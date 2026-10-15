@@ -1,0 +1,1886 @@
+<!DOCTYPE html>
+<html lang="en" class="dark">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>CineSync Kosmi — P2P WebRTC Watch Party & Media Engine</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <!-- PeerJS for WebRTC Signaling & Media/DataChannel Transport -->
+  <script src="https://unpkg.com/peerjs@1.5.4/dist/peerjs.min.js"></script>
+  <!-- MQTT.js over WSS as Secondary Redundant Room Signaling Bus -->
+  <script src="https://unpkg.com/mqtt@5.3.4/dist/mqtt.min.js"></script>
+  <style>
+    :root {
+      color-scheme: dark;
+    }
+    body {
+      background: #090b10;
+      color: #f1f5f9;
+      font-family: Inter, system-ui, -apple-system, sans-serif;
+      overflow-x: hidden;
+    }
+    /* Custom Scrollbar */
+    ::-webkit-scrollbar { width: 6px; height: 6px; }
+    ::-webkit-scrollbar-track { background: #0f131d; }
+    ::-webkit-scrollbar-thumb { background: #262f45; border-radius: 9999px; }
+    ::-webkit-scrollbar-thumb:hover { background: #3b82f6; }
+
+    /* Crisp Subtitle Overlay (Kosmi Canvas/DOM Layer) */
+    #subtitleOverlay {
+      text-shadow: 0 2px 6px rgba(0,0,0,0.95), 0 0 12px rgba(0,0,0,0.85), -1px -1px 0 #000, 1px -1px 0 #000, -1px 1px 0 #000, 1px 1px 0 #000;
+      pointer-events: none;
+      transition: all 0.08s ease;
+    }
+
+    /* Floating Reaction Animation */
+    @keyframes floatUpReaction {
+      0% { transform: translateY(0) scale(0.75); opacity: 1; }
+      70% { opacity: 0.95; }
+      100% { transform: translateY(-290px) scale(1.35); opacity: 0; }
+    }
+    .floating-emoji {
+      position: absolute;
+      bottom: 84px;
+      font-size: 2.1rem;
+      pointer-events: none;
+      z-index: 45;
+      animation: floatUpReaction 2.4s cubic-bezier(0.16, 1, 0.3, 1) forwards;
+    }
+
+    .glass-panel {
+      background: rgba(15, 19, 29, 0.88);
+      backdrop-filter: blur(12px);
+      border: 1px solid rgba(255, 255, 255, 0.08);
+    }
+  </style>
+</head>
+<body class="min-h-screen flex flex-col select-none">
+
+  <!-- TOP NAVIGATION & ROOM SIGNALING BAR -->
+  <header class="glass-panel sticky top-0 z-50 px-3 py-2.5 border-b border-slate-800/80">
+    <div class="max-w-[1600px] mx-auto flex flex-wrap items-center justify-between gap-2">
+      
+      <!-- Brand + Active Engine Badge -->
+      <div class="flex items-center gap-3">
+        <div class="flex items-center gap-2">
+          <div class="w-8 h-8 rounded-lg bg-gradient-to-br from-indigo-500 via-blue-600 to-cyan-400 flex items-center justify-center font-black text-white shadow-lg shadow-indigo-500/20">
+            K
+          </div>
+          <div>
+            <div class="flex items-center gap-2">
+              <span class="font-bold tracking-tight text-sm md:text-base text-white">CineSync <span class="text-indigo-400">Kosmi</span></span>
+              <span id="roleBadge" class="text-[10px] font-semibold uppercase px-2 py-0.5 rounded-full bg-slate-800 text-slate-300 border border-slate-700">
+                Standby
+              </span>
+            </div>
+            <p class="text-[11px] text-slate-400 hidden sm:block">Sub-500ms WebRTC P2P Watch Party • Stereo Opus SDP • MKV/VLC Engine</p>
+          </div>
+        </div>
+      </div>
+
+      <!-- Room Join / Create Controls -->
+      <div class="flex flex-wrap items-center gap-2">
+        <div class="flex items-center bg-slate-900/90 border border-slate-700/80 rounded-lg px-2 py-1 gap-1.5">
+          <span class="text-[11px] text-slate-400 font-medium">Name:</span>
+          <input id="usernameInput" type="text" maxlength="16" placeholder="Ashirwad"
+            class="bg-transparent text-xs font-semibold text-white w-24 focus:outline-none border-b border-transparent focus:border-indigo-400" />
+        </div>
+
+        <div class="flex items-center bg-slate-900/90 border border-slate-700/80 rounded-lg px-2 py-1 gap-1.5">
+          <span class="text-[11px] text-slate-400 font-medium">Room:</span>
+          <input id="roomInput" type="text" maxlength="12" placeholder="MOVIE1"
+            class="bg-transparent text-xs font-mono font-bold uppercase text-indigo-300 w-20 focus:outline-none" />
+          <button id="joinRoomBtn" onclick="joinOrCreateRoom()"
+            class="bg-indigo-600 hover:bg-indigo-500 active:bg-indigo-700 text-white text-xs font-semibold px-3 py-1 rounded-md transition shadow-sm">
+            Connect Room
+          </button>
+        </div>
+
+        <button onclick="copyInviteLink()" title="Copy direct auto-join room link for your friend"
+          class="bg-slate-800 hover:bg-slate-700 text-slate-200 text-xs font-medium px-2.5 py-1.5 rounded-lg border border-slate-700 flex items-center gap-1.5 transition">
+          <span>🔗</span> <span id="inviteBtnText" class="hidden md:inline">Invite Link</span>
+        </button>
+
+        <!-- Connection & Peer Telemetry Pill -->
+        <div class="flex items-center gap-2 bg-slate-900/90 border border-slate-800 px-2.5 py-1.5 rounded-lg">
+          <span id="connDot" class="w-2.5 h-2.5 rounded-full bg-amber-400 animate-pulse"></span>
+          <span id="connStatusText" class="text-xs font-medium text-slate-300">Initializing...</span>
+          <span id="peerCountBadge" class="text-[11px] font-mono bg-slate-800 text-indigo-300 px-1.5 py-0.5 rounded">1/2</span>
+        </div>
+      </div>
+    </div>
+  </header>
+
+  <!-- MAIN WORKSPACE -->
+  <main class="flex-1 max-w-[1600px] w-full mx-auto grid grid-cols-1 lg:grid-cols-12 gap-3 p-3">
+
+    <!-- LEFT / CENTER: STAGE + KOSMI 4-ENGINE TOOLBAR (8 or 9 cols) -->
+    <section class="lg:col-span-9 flex flex-col gap-3">
+
+      <!-- ENGINE SELECTOR & QUALITY BAR -->
+      <div class="glass-panel rounded-xl p-2.5 flex flex-wrap items-center justify-between gap-2">
+        <!-- 4 Media Engines -->
+        <div class="flex flex-wrap items-center gap-1.5">
+          <span class="text-[11px] font-semibold uppercase tracking-wider text-slate-400 mr-1">Media Engine:</span>
+
+          <!-- Engine A: Local File (captureStream + MKV Inspector) -->
+          <label class="cursor-pointer bg-indigo-600/20 hover:bg-indigo-600/30 border border-indigo-500/40 text-indigo-200 text-xs font-medium px-2.5 py-1.5 rounded-lg flex items-center gap-1.5 transition">
+            <span>📁</span>
+            <span>Engine A: Local File (MP4/MKV)</span>
+            <input id="localFileInput" type="file" accept="video/*,.mkv,.mp4,.webm,.avi,.mov" class="hidden" onchange="handleLocalVideoFile(event)" />
+          </label>
+
+          <!-- Engine B: VLC / Window Share (getDisplayMedia + Stereo Opus) -->
+          <button onclick="startVlcWindowShare()"
+            class="bg-emerald-600/20 hover:bg-emerald-600/30 border border-emerald-500/40 text-emerald-200 text-xs font-medium px-2.5 py-1.5 rounded-lg flex items-center gap-1.5 transition"
+            title="Best for MKV files with Dolby AC3/DTS audio! Open the movie in VLC with subtitles on, then click here to share the VLC window in stereo.">
+            <span>🖥️</span>
+            <span>Engine B: Share VLC / Tab (Stereo Audio)</span>
+          </button>
+
+          <!-- Engine D: Direct URL / Demo Movie -->
+          <button onclick="toggleUrlModal()"
+            class="bg-cyan-600/20 hover:bg-cyan-600/30 border border-cyan-500/40 text-cyan-200 text-xs font-medium px-2.5 py-1.5 rounded-lg flex items-center gap-1.5 transition">
+            <span>🌐</span>
+            <span>Engine D: Sync URL / Demo</span>
+          </button>
+
+          <!-- External .SRT / .VTT Loader -->
+          <label class="cursor-pointer bg-slate-800 hover:bg-slate-700 border border-slate-700 text-slate-200 text-xs font-medium px-2.5 py-1.5 rounded-lg flex items-center gap-1.5 transition">
+            <span>💬</span>
+            <span>+ Load .SRT/.VTT</span>
+            <input id="srtFileInput" type="file" accept=".srt,.vtt,.ass" class="hidden" onchange="handleExternalSubtitleFile(event)" />
+          </label>
+        </div>
+
+        <!-- Bitrate / Resolution Selector & Live Telemetry Toggle -->
+        <div class="flex flex-wrap items-center gap-2">
+          <div class="flex items-center gap-1 bg-slate-900 border border-slate-700/80 rounded-lg px-2 py-1">
+            <span class="text-[11px] text-slate-400">Stream Quality:</span>
+            <select id="qualitySelect" onchange="applyWebRtcQualityPreset()"
+              class="bg-transparent text-xs font-semibold text-indigo-300 focus:outline-none cursor-pointer">
+              <option value="720p30" class="bg-slate-900">720p @ 30fps (4 Mbps Eco)</option>
+              <option value="1080p60" selected class="bg-slate-900">1080p @ 60fps (10 Mbps HD)</option>
+              <option value="source4k" class="bg-slate-900">Source / 4K (25 Mbps Ultra)</option>
+            </select>
+          </div>
+
+          <button onclick="toggleTelemetryOverlay()"
+            class="bg-slate-800 hover:bg-slate-700 text-slate-300 text-xs px-2.5 py-1.5 rounded-lg border border-slate-700 font-mono transition"
+            title="Show real-time WebRTC RTCPeerConnection.getStats() telemetry">
+            📊 Stats
+          </button>
+        </div>
+      </div>
+
+      <!-- URL / DEMO MOVIE BAR (Collapsible) -->
+      <div id="urlInputBar" class="hidden glass-panel rounded-xl p-2.5 flex flex-wrap items-center gap-2 border border-cyan-500/30">
+        <input id="directUrlInput" type="url"
+          placeholder="Paste direct .mp4 / .webm / HLS stream URL (both peers load directly with RTT clock sync)..."
+          class="flex-1 min-w-[240px] bg-slate-900 border border-slate-700 rounded-lg px-3 py-1.5 text-xs text-white focus:outline-none focus:border-cyan-400" />
+        <button onclick="loadSyncedUrlMovie()"
+          class="bg-cyan-600 hover:bg-cyan-500 text-white text-xs font-semibold px-3 py-1.5 rounded-lg transition">
+          Load & Sync URL
+        </button>
+        <button onclick="loadInstantDemoMovie()"
+          class="bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-semibold px-3 py-1.5 rounded-lg transition">
+          🎬 Load Tear of Steel (HD Test Movie + Subs)
+        </button>
+      </div>
+
+      <!-- VIDEO STAGE CONTAINER -->
+      <div id="stageContainer" class="relative bg-black rounded-2xl overflow-hidden border border-slate-800/90 shadow-2xl aspect-video flex items-center justify-center group">
+
+        <!-- Primary HTML5 Video Element -->
+        <video id="mainVideo" class="w-full h-full object-contain bg-black" playsinline crossorigin="anonymous"></video>
+
+        <!-- Crisp Client-Side Subtitle Overlay Layer (Never compressed by WebRTC!) -->
+        <div id="subtitleOverlay"
+          class="absolute bottom-16 left-6 right-6 text-center text-white font-semibold tracking-wide z-30 select-none"
+          style="font-size: 22px;"></div>
+
+        <!-- Floating Emoji Container -->
+        <div id="reactionStage" class="absolute inset-0 pointer-events-none overflow-hidden z-40"></div>
+
+        <!-- Autoplay Unmute Rescue Banner (When Guest receives Host's WebRTC stream) -->
+        <button id="unmuteRescueBtn" onclick="forceUnmuteAndPlayGuestStream()"
+          class="hidden absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 z-50 bg-indigo-600 hover:bg-indigo-500 text-white font-bold px-6 py-3.5 rounded-2xl shadow-2xl border border-indigo-300/40 flex items-center gap-3 animate-bounce">
+          <span class="text-2xl">🔊</span>
+          <div class="text-left">
+            <div class="text-sm">Click to Play & Unmute Live Stream</div>
+            <div class="text-[11px] font-normal text-indigo-200">Your browser paused incoming audio automatically</div>
+          </div>
+        </button>
+
+        <!-- Empty Stage Standby Overlay -->
+        <div id="emptyStageOverlay" class="absolute inset-0 flex flex-col items-center justify-center p-6 text-center bg-gradient-to-b from-slate-950/80 via-slate-950/90 to-slate-950 z-20">
+          <div class="w-16 h-16 rounded-2xl bg-indigo-500/10 border border-indigo-500/30 flex items-center justify-center text-3xl mb-3 shadow-inner">
+            🍿
+          </div>
+          <h2 class="text-base md:text-lg font-bold text-white mb-1">Kosmi-Architecture Dual-Engine Stage Ready</h2>
+          <p class="text-xs text-slate-400 max-w-lg mb-4 leading-relaxed">
+            Connect to the same Room Code on 2 devices. Pick <strong class="text-indigo-300">Engine A (Local File)</strong> to stream or sync local MP4/MKV files with custom subtitles, or pick <strong class="text-emerald-300">Engine B (Share VLC Window)</strong> to stream any dual-audio MKV straight from VLC in high-bitrate stereo.
+          </p>
+          <div class="flex flex-wrap items-center justify-center gap-2">
+            <button onclick="document.getElementById('localFileInput').click()"
+              class="bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-semibold px-4 py-2 rounded-xl shadow-lg shadow-indigo-600/25 transition">
+              📁 Open Local Movie (MP4 / MKV)
+            </button>
+            <button onclick="startVlcWindowShare()"
+              class="bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-semibold px-4 py-2 rounded-xl shadow-lg shadow-emerald-600/25 transition">
+              🖥️ Share VLC Window (Stereo Opus)
+            </button>
+            <button onclick="loadInstantDemoMovie()"
+              class="bg-slate-800 hover:bg-slate-700 text-slate-200 text-xs font-semibold px-4 py-2 rounded-xl border border-slate-700 transition">
+              🎬 Try Instant HD Demo Movie
+            </button>
+          </div>
+        </div>
+
+        <!-- Real-Time WebRTC Telemetry HUD (getStats()) -->
+        <div id="telemetryHud" class="hidden absolute top-3 left-3 z-40 glass-panel rounded-xl p-3 text-[11px] font-mono text-slate-200 space-y-1 border border-slate-700/80 max-w-xs">
+          <div class="flex items-center justify-between gap-4 border-b border-slate-800 pb-1 mb-1">
+            <span class="font-bold text-indigo-400">WEBRTC GETSTATS() HUD</span>
+            <span id="statTopology" class="px-1.5 py-0.2 bg-emerald-500/20 text-emerald-300 rounded text-[10px]">P2P Direct</span>
+          </div>
+          <div>Engine: <span id="statEngine" class="text-cyan-300">Idle</span></div>
+          <div>Resolution / FPS: <span id="statResFps" class="text-white">—</span></div>
+          <div>Bitrate: <span id="statBitrate" class="text-emerald-400">0 kbps</span></div>
+          <div>Round-Trip Time (RTT): <span id="statRtt" class="text-amber-300">— ms</span></div>
+          <div>Clock Drift: <span id="statDrift" class="text-indigo-300">0 ms</span></div>
+          <div>Quality Limit Reason: <span id="statQualityLimit" class="text-rose-300">none</span></div>
+          <div>Audio DSP: <span id="statAudioDsp" class="text-emerald-300">Stereo Opus 192k (AEC Off)</span></div>
+        </div>
+
+        <!-- Top-Right Mode & Sync Status Badge -->
+        <div class="absolute top-3 right-3 z-30 flex items-center gap-2 pointer-events-none">
+          <span id="activeEnginePill" class="px-2.5 py-1 rounded-full text-[11px] font-semibold bg-slate-900/85 text-slate-300 border border-slate-700/80 backdrop-blur-md">
+            No Media Loaded
+          </span>
+          <span id="driftLockPill" class="hidden px-2.5 py-1 rounded-full text-[11px] font-mono bg-emerald-950/90 text-emerald-300 border border-emerald-500/40">
+            ⚡ Locked (<50ms)
+          </span>
+        </div>
+
+        <!-- BOTTOM TRANSPORT & AUDIO/SUBTITLE MANAGER BAR -->
+        <div class="absolute bottom-0 inset-x-0 z-30 bg-gradient-to-t from-black/95 via-black/75 to-transparent pt-8 pb-2.5 px-3 flex flex-col gap-2">
+          
+          <!-- Timeline Scrub Bar -->
+          <div class="flex items-center gap-2.5">
+            <span id="currentTimeLabel" class="text-[11px] font-mono text-slate-300 w-12 text-right">00:00</span>
+            <input id="seekSlider" type="range" min="0" max="100" step="0.1" value="0"
+              oninput="handleSeekInput(this.value)" onchange="handleSeekCommit(this.value)"
+              class="flex-1 h-1.5 bg-slate-700 rounded-lg appearance-none cursor-pointer accent-indigo-500" />
+            <span id="durationLabel" class="text-[11px] font-mono text-slate-400 w-12">00:00</span>
+          </div>
+
+          <!-- Controls Row -->
+          <div class="flex flex-wrap items-center justify-between gap-2">
+            <!-- Left Transport Controls (Bidirectional for both Host & Guest) -->
+            <div class="flex items-center gap-1.5">
+              <button id="playPauseBtn" onclick="userTogglePlayPause()"
+                class="bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-bold px-3 py-1.5 rounded-lg transition flex items-center gap-1">
+                <span id="playPauseIcon">▶️</span>
+                <span id="playPauseText">Play</span>
+              </button>
+
+              <button onclick="userSkipSeconds(-10)" class="bg-slate-800/90 hover:bg-slate-700 text-slate-200 text-xs px-2 py-1.5 rounded-lg border border-slate-700">
+                -10s
+              </button>
+              <button onclick="userSkipSeconds(10)" class="bg-slate-800/90 hover:bg-slate-700 text-slate-200 text-xs px-2 py-1.5 rounded-lg border border-slate-700">
+                +10s
+              </button>
+
+              <!-- Independent Movie Volume Mixer (Web Audio API / Element Gain) -->
+              <div class="flex items-center gap-1.5 bg-slate-900/90 border border-slate-700/80 rounded-lg px-2 py-1 ml-1">
+                <span class="text-xs">🎬🔊</span>
+                <input id="movieVolumeSlider" type="range" min="0" max="1" step="0.02" value="1"
+                  oninput="setMovieVolume(this.value)"
+                  class="w-16 h-1 bg-slate-700 rounded appearance-none cursor-pointer accent-indigo-400"
+                  title="Independent Local Movie Volume" />
+              </div>
+
+              <button onclick="requestManualForceSync()"
+                class="bg-slate-800/90 hover:bg-slate-700 text-indigo-300 text-xs font-medium px-2.5 py-1.5 rounded-lg border border-slate-700 transition"
+                title="Force-lock timestamp and playback state across both devices">
+                🔄 Resync Clock
+              </button>
+            </div>
+
+            <!-- Right Track Managers (MKV Multi-Audio, Subtitle Overlay Config, Reactions, Fullscreen) -->
+            <div class="flex items-center gap-1.5 relative">
+
+              <!-- Quick Floating Reactions -->
+              <div class="hidden sm:flex items-center bg-slate-900/90 border border-slate-700/80 rounded-lg px-1.5 py-0.5 gap-1">
+                <button onclick="sendReaction('😂')" class="hover:scale-125 transition text-sm px-1">😂</button>
+                <button onclick="sendReaction('🔥')" class="hover:scale-125 transition text-sm px-1">🔥</button>
+                <button onclick="sendReaction('😱')" class="hover:scale-125 transition text-sm px-1">😱</button>
+                <button onclick="sendReaction('❤️')" class="hover:scale-125 transition text-sm px-1">❤️</button>
+                <button onclick="sendReaction('👏')" class="hover:scale-125 transition text-sm px-1">👏</button>
+              </div>
+
+              <!-- Multi-Audio Track Popover Button -->
+              <button onclick="togglePopover('audioPopover')"
+                class="bg-slate-800/90 hover:bg-slate-700 text-slate-200 text-xs font-medium px-2.5 py-1.5 rounded-lg border border-slate-700 flex items-center gap-1">
+                <span>🎧</span>
+                <span id="audioBtnLabel">Audio</span>
+              </button>
+
+              <!-- Subtitle Track & Offset Popover Button -->
+              <button onclick="togglePopover('subtitlePopover')"
+                class="bg-slate-800/90 hover:bg-slate-700 text-slate-200 text-xs font-medium px-2.5 py-1.5 rounded-lg border border-slate-700 flex items-center gap-1">
+                <span>CC</span>
+                <span id="subBtnLabel">Subtitles</span>
+              </button>
+
+              <!-- Fullscreen Button -->
+              <button onclick="toggleStageFullscreen()"
+                class="bg-slate-800/90 hover:bg-slate-700 text-slate-200 text-xs font-medium px-2.5 py-1.5 rounded-lg border border-slate-700"
+                title="Fullscreen (keeps subtitles & controls visible)">
+                ⛶
+              </button>
+
+              <!-- POPOVER 1: MKV / MP4 MULTI-AUDIO TRACK SWITCHER -->
+              <div id="audioPopover" class="hidden absolute bottom-11 right-16 w-80 glass-panel rounded-xl p-3 shadow-2xl border border-slate-700 z-50 text-left">
+                <div class="flex items-center justify-between border-b border-slate-800 pb-1.5 mb-2">
+                  <span class="text-xs font-bold text-white">🎧 Multi-Audio Track Manager</span>
+                  <button onclick="togglePopover('audioPopover')" class="text-slate-400 hover:text-white text-xs">✕</button>
+                </div>
+                <div id="audioTrackList" class="space-y-1.5 max-h-44 overflow-y-auto text-xs">
+                  <div class="text-slate-400 py-2">Load a local MKV/MP4 file to inspect embedded audio tracks.</div>
+                </div>
+                <div class="mt-2 pt-2 border-t border-slate-800/90 text-[11px] text-slate-400 leading-snug">
+                  💡 <strong class="text-emerald-300">Dolby AC3/DTS Silent?</strong> Standard browsers block proprietary AC3 codecs. If an MKV track is silent, click <strong class="text-white">Engine B: Share VLC Window</strong> above to stream VLC's native audio in stereo!
+                </div>
+              </div>
+
+              <!-- POPOVER 2: SUBTITLE OVERLAY & SYNC MANAGER -->
+              <div id="subtitlePopover" class="hidden absolute bottom-11 right-0 w-80 glass-panel rounded-xl p-3 shadow-2xl border border-slate-700 z-50 text-left">
+                <div class="flex items-center justify-between border-b border-slate-800 pb-1.5 mb-2">
+                  <span class="text-xs font-bold text-white">💬 Crisp Subtitle Overlay Layer</span>
+                  <button onclick="togglePopover('subtitlePopover')" class="text-slate-400 hover:text-white text-xs">✕</button>
+                </div>
+
+                <div id="subtitleTrackList" class="space-y-1 max-h-36 overflow-y-auto text-xs mb-2">
+                  <button onclick="selectSubtitleTrack(-1)" class="w-full text-left px-2 py-1 rounded bg-slate-800 text-indigo-300 font-medium">
+                    Off (No Subtitles)
+                  </button>
+                </div>
+
+                <!-- Subtitle Delay & Font Size Controls -->
+                <div class="flex items-center justify-between gap-2 pt-2 border-t border-slate-800 text-[11px]">
+                  <span>Timing Offset: <strong id="subOffsetLabel" class="text-indigo-300">0.0s</strong></span>
+                  <div class="flex gap-1">
+                    <button onclick="adjustSubOffset(-0.5)" class="px-2 py-0.5 bg-slate-800 hover:bg-slate-700 rounded border border-slate-700">-0.5s</button>
+                    <button onclick="adjustSubOffset(0.5)" class="px-2 py-0.5 bg-slate-800 hover:bg-slate-700 rounded border border-slate-700">+0.5s</button>
+                  </div>
+                </div>
+
+                <div class="flex items-center justify-between gap-2 mt-2 pt-2 border-t border-slate-800 text-[11px]">
+                  <label class="cursor-pointer bg-indigo-600/30 hover:bg-indigo-600/50 border border-indigo-500/40 text-indigo-200 px-2.5 py-1 rounded font-medium">
+                    + Upload .SRT / .VTT
+                    <input type="file" accept=".srt,.vtt,.ass" class="hidden" onchange="handleExternalSubtitleFile(event)" />
+                  </label>
+                  <button onclick="broadcastActiveSubtitlesToPeer()"
+                    class="bg-emerald-600/30 hover:bg-emerald-600/50 border border-emerald-500/40 text-emerald-200 px-2.5 py-1 rounded font-medium">
+                    📡 Sync Subs to Friend
+                  </button>
+                </div>
+              </div>
+
+            </div>
+          </div>
+        </div>
+      </div>
+
+    </section>
+
+    <!-- RIGHT SIDEBAR: AEC3 VIDEO CALL DOCK + INDEPENDENT AUDIO MIXER + REAL-TIME CHAT (3 cols) -->
+    <aside class="lg:col-span-3 flex flex-col gap-3">
+
+      <!-- WEBRTC VIDEO & VOICE CALL DOCK (AEC3 Enabled) -->
+      <div class="glass-panel rounded-2xl p-3 flex flex-col gap-2.5">
+        <div class="flex items-center justify-between">
+          <div>
+            <h3 class="text-xs font-bold uppercase tracking-wider text-slate-300 flex items-center gap-1.5">
+              <span>📹</span> <span>Party Call (AEC3 Voice DSP)</span>
+            </h3>
+            <p class="text-[10px] text-slate-400">360p Eco Simulcast • Subtracts movie audio from mic</p>
+          </div>
+
+          <button id="callToggleBtn" onclick="toggleMediaCall()"
+            class="bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-semibold px-3 py-1.5 rounded-lg shadow transition">
+            Join Call
+          </button>
+        </div>
+
+        <!-- 2-Tile Webcam Grid -->
+        <div class="grid grid-cols-2 gap-2">
+          <!-- Local Camera Tile -->
+          <div class="relative bg-slate-900 rounded-xl overflow-hidden aspect-video border border-slate-800 flex items-center justify-center">
+            <video id="localCamVideo" autoplay muted playsinline class="w-full h-full object-cover scale-x-[-1] hidden"></video>
+            <div id="localCamPlaceholder" class="flex flex-col items-center text-slate-500 text-[11px]">
+              <span class="text-xl mb-0.5">🙂</span>
+              <span>You (Off)</span>
+            </div>
+            <span class="absolute bottom-1.5 left-1.5 bg-black/70 text-[10px] px-1.5 py-0.5 rounded text-slate-200">You</span>
+          </div>
+
+          <!-- Remote Friend Camera Tile -->
+          <div class="relative bg-slate-900 rounded-xl overflow-hidden aspect-video border border-slate-800 flex items-center justify-center">
+            <video id="remoteCamVideo" autoplay playsinline class="w-full h-full object-cover hidden"></video>
+            <div id="remoteCamPlaceholder" class="flex flex-col items-center text-slate-500 text-[11px]">
+              <span class="text-xl mb-0.5">🎧</span>
+              <span id="remoteCallStatusLabel">Friend</span>
+            </div>
+            <span id="remoteCamNameTag" class="absolute bottom-1.5 left-1.5 bg-black/70 text-[10px] px-1.5 py-0.5 rounded text-indigo-300">Friend</span>
+          </div>
+        </div>
+
+        <!-- Call Controls & Friend Voice GainNode Mixer -->
+        <div class="flex flex-wrap items-center justify-between gap-2 pt-1 border-t border-slate-800/80">
+          <div class="flex items-center gap-1.5">
+            <button id="micMuteBtn" onclick="toggleMicMute()"
+              class="bg-slate-800 hover:bg-slate-700 text-slate-200 text-xs px-2.5 py-1 rounded-lg border border-slate-700 transition">
+              🎤 Mic On
+            </button>
+            <button id="camMuteBtn" onclick="toggleCamMute()"
+              class="bg-slate-800 hover:bg-slate-700 text-slate-200 text-xs px-2.5 py-1 rounded-lg border border-slate-700 transition">
+              📷 Cam On
+            </button>
+          </div>
+
+          <!-- Friend Voice Volume Fader -->
+          <div class="flex items-center gap-1.5 text-[11px] text-slate-300" title="Independent Friend Voice Volume (0% to 150% Boost)">
+            <span>🗣️</span>
+            <input id="friendVoiceSlider" type="range" min="0" max="1.5" step="0.05" value="1"
+              oninput="setFriendVoiceGain(this.value)"
+              class="w-20 h-1 bg-slate-700 rounded appearance-none cursor-pointer accent-emerald-400" />
+          </div>
+        </div>
+      </div>
+
+      <!-- DUAL-CHANNEL REAL-TIME CHAT & SYSTEM LOG -->
+      <div class="glass-panel rounded-2xl p-3 flex-1 flex flex-col min-h-[320px] max-h-[520px]">
+        <div class="flex items-center justify-between border-b border-slate-800 pb-2 mb-2">
+          <div class="flex items-center gap-1.5">
+            <span class="text-xs font-bold uppercase tracking-wider text-slate-300">💬 Room Chat & Sync Log</span>
+          </div>
+          <span id="transportChannelBadge" class="text-[10px] font-mono px-2 py-0.5 rounded bg-indigo-500/15 text-indigo-300 border border-indigo-500/30">
+            WSS + DataChannel
+          </span>
+        </div>
+
+        <!-- Chat Messages Scroll Box -->
+        <div id="chatMessagesBox" class="flex-1 overflow-y-auto space-y-2 pr-1 text-xs">
+          <div class="bg-slate-900/80 border border-slate-800 rounded-xl p-2.5 text-slate-300 leading-relaxed">
+            <span class="font-bold text-indigo-400">System:</span> Welcome to <strong class="text-white">CineSync Kosmi</strong>! Click <strong class="text-indigo-300">Invite Link</strong> at the top and send it to your friend. Both of you have full Play, Pause, and Seek controls.
+          </div>
+        </div>
+
+        <!-- Chat Input Form -->
+        <form onsubmit="handleChatSubmit(event)" class="mt-2.5 flex items-center gap-1.5">
+          <input id="chatInput" type="text" placeholder="Type a message or press emoji..."
+            class="flex-1 bg-slate-900 border border-slate-700/90 rounded-xl px-3 py-2 text-xs text-white focus:outline-none focus:border-indigo-500" />
+          <button type="submit"
+            class="bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-semibold px-3.5 py-2 rounded-xl transition">
+            Send
+          </button>
+        </form>
+      </div>
+
+    </aside>
+  </main>
+
+  <!-- APPLICATION SCRIPT: KOSMI HYBRID SIGNALING, 4 MEDIA ENGINES, SDP OPUS STEREO, & SUBTITLES -->
+  <script>
+    /*************************************************************************
+     * 1. GLOBAL STATE & DETERMINISTIC ROOM CONFIGURATION
+     *************************************************************************/
+    const STATE = {
+      roomCode: 'MOVIE1',
+      username: 'User-' + Math.floor(100 + Math.random() * 899),
+      clientId: 'cid_' + Math.random().toString(36).substring(2, 9),
+      role: 'HOST', // Dynamically assigned: 'HOST' or 'GUEST'
+      isConnectedToPeer: false,
+
+      // Active Media Engine: 'NONE' | 'LOCAL_FILE' | 'VLC_CAPTURE' | 'SYNC_URL' | 'RECEIVING_STREAM'
+      engine: 'NONE',
+      currentFile: null,
+      remoteDuration: 0,
+      remoteCurrentTime: 0,
+      isSeeking: false,
+      suppressSyncEcho: false,
+
+      // Network Transports
+      peer: null,
+      dataConn: null,
+      mediaCallToGuest: null, // Movie stream call
+      webcamCall: null,       // Voice/Cam call
+      mqttClient: null,
+      bcChannel: null,
+
+      // Streams
+      outgoingStageStream: null,
+      localCamStream: null,
+      micMuted: false,
+      camMuted: false,
+
+      // Web Audio API Independent GainNode for Friend's Voice
+      audioCtx: null,
+      friendGainNode: null,
+
+      // Subtitles & Multi-Audio
+      subtitles: [], // Array of { name, cues: [{start, end, text}] }
+      activeSubIndex: -1,
+      subOffsetSec: 0.0,
+      detectedAudioTracks: [],
+      ebmlHeaderBuffer: null,
+
+      // RTT & Telemetry
+      lastPingSentAt: 0,
+      rttMs: 42,
+      clockDriftMs: 0,
+      lastBytesTransferred: 0,
+      lastStatsTimestamp: 0
+    };
+
+    // High-availability STUN + OpenRelay/Metered TURN servers (UDP + TCP 443 for strict NAT/Firewalls)
+    const RTC_ICE_CONFIG = {
+      iceServers: [
+        { urls: 'stun:stun.l.google.com:19302' },
+        { urls: 'stun:stun1.l.google.com:19302' },
+        { urls: 'stun:global.stun.twilio.com:3478' },
+        {
+          urls: [
+            'turn:openrelay.metered.ca:80',
+            'turn:openrelay.metered.ca:443',
+            'turn:openrelay.metered.ca:443?transport=tcp'
+          ],
+          username: 'openrelayproject',
+          credential: 'openrelayproject'
+        }
+      ],
+      sdpSemantics: 'unified-plan'
+    };
+
+    const mainVideo = document.getElementById('mainVideo');
+    const seekSlider = document.getElementById('seekSlider');
+
+    /*************************************************************************
+     * 2. INITIALIZATION & DETERMINISTIC SIGNALING (SOLVES NETLIFY JOIN BUGS)
+     *************************************************************************/
+    window.addEventListener('DOMContentLoaded', () => {
+      // Parse ?room=XXXX from URL if present
+      const params = new URLSearchParams(window.location.search);
+      const urlRoom = params.get('room');
+      if (urlRoom) {
+        STATE.roomCode = urlRoom.trim().toUpperCase().replace(/[^A-Z0-9]/g, '').slice(0, 12) || 'MOVIE1';
+      }
+      document.getElementById('roomInput').value = STATE.roomCode;
+
+      const savedName = localStorage.getItem('kosmi_username');
+      if (savedName) STATE.username = savedName;
+      document.getElementById('usernameInput').value = STATE.username;
+
+      setupVideoPlayerListeners();
+      joinOrCreateRoom();
+
+      // Periodic Heartbeat + RTT Ping + WebRTC getStats() Telemetry Loop
+      setInterval(runHeartbeatAndDriftLoop, 2000);
+      setInterval(pollWebRtcStats, 2000);
+    });
+
+    function joinOrCreateRoom() {
+      const rawRoom = document.getElementById('roomInput').value.trim().toUpperCase().replace(/[^A-Z0-9]/g, '');
+      const rawName = document.getElementById('usernameInput').value.trim();
+      if (rawRoom) STATE.roomCode = rawRoom;
+      if (rawName) {
+        STATE.username = rawName;
+        localStorage.setItem('kosmi_username', rawName);
+      }
+
+      // Update URL cleanly without reloading
+      const newUrl = `${window.location.pathname}?room=${STATE.roomCode}`;
+      window.history.replaceState({}, '', newUrl);
+
+      setConnectionStatus('connecting', `Joining ${STATE.roomCode}...`);
+      appendSystemChat(`Connecting to Room [${STATE.roomCode}] via deterministic P2P + WSS MQTT signaling...`);
+
+      // 1. Setup Local BroadcastChannel (for testing 2 tabs on the same laptop)
+      if (STATE.bcChannel) STATE.bcChannel.close();
+      if ('BroadcastChannel' in window) {
+        STATE.bcChannel = new BroadcastChannel(`kosmi_room_${STATE.roomCode}`);
+        STATE.bcChannel.onmessage = (ev) => handleSignalingMessage(ev.data, 'BC');
+      }
+
+      // 2. Connect Redundant WSS MQTT Signaling Bus
+      initMqttSignaling(STATE.roomCode);
+
+      // 3. Connect Deterministic PeerJS WebRTC Node
+      // First peer to claim `kosmi-v4-<ROOM>-host` becomes HOST; if taken, automatically claims `-guest` and calls HOST!
+      initDeterministicPeerJs(STATE.roomCode);
+    }
+
+    function initMqttSignaling(roomCode) {
+      if (STATE.mqttClient) {
+        try { STATE.mqttClient.end(true); } catch (e) {}
+      }
+      const topic = `cinesync_kosmi_v4/${roomCode}/signal`;
+      const brokerUrl = 'wss://broker.emqx.io:8084/mqtt';
+
+      try {
+        const client = mqtt.connect(brokerUrl, {
+          clientId: 'kosmi_' + STATE.clientId + '_' + Math.floor(Math.random() * 9999),
+          clean: true,
+          connectTimeout: 5000,
+          reconnectPeriod: 3000
+        });
+
+        client.on('connect', () => {
+          client.subscribe(topic, { qos: 0 });
+          // Announce presence to room over WSS immediately
+          sendSignalingPacket({
+            type: 'HELLO_ROOM',
+            username: STATE.username,
+            peerId: STATE.peer ? STATE.peer.id : null
+          });
+        });
+
+        client.on('message', (t, payloadBuffer) => {
+          try {
+            const data = JSON.parse(payloadBuffer.toString());
+            if (data.senderId !== STATE.clientId) {
+              handleSignalingMessage(data, 'MQTT');
+            }
+          } catch (err) {}
+        });
+
+        STATE.mqttClient = client;
+      } catch (e) {
+        console.warn('MQTT fallback error:', e);
+      }
+    }
+
+    function initDeterministicPeerJs(roomCode) {
+      if (STATE.peer) {
+        try { STATE.peer.destroy(); } catch (e) {}
+      }
+
+      const hostPeerId = `kosmi-v4-${roomCode.toLowerCase()}-host`;
+      const guestPeerId = `kosmi-v4-${roomCode.toLowerCase()}-guest-${ Math.floor(100 + Math.random() * 899) }`;
+
+      // Attempt to register as the deterministic Room Host first
+      const tryHostPeer = new Peer(hostPeerId, { config: RTC_ICE_CONFIG, debug: 1 });
+
+      tryHostPeer.on('open', (id) => {
+        STATE.peer = tryHostPeer;
+        STATE.role = 'HOST';
+        updateRoleBadge('HOST (Primary)');
+        setConnectionStatus('ready', `Room ${roomCode} Ready (Waiting for friend)`);
+        setupPeerEventHandlers(tryHostPeer);
+        sendSignalingPacket({ type: 'HELLO_ROOM', username: STATE.username, peerId: id });
+      });
+
+      tryHostPeer.on('error', (err) => {
+        if (err.type === 'unavailable-id') {
+          // Host slot is already active! Join as Guest and immediately connect to `hostPeerId`
+          try { tryHostPeer.destroy(); } catch (e) {}
+          connectAsGuestPeer(guestPeerId, hostPeerId);
+        } else {
+          console.warn('Peer error:', err.type);
+        }
+      });
+    }
+
+    function connectAsGuestPeer(guestPeerId, hostPeerId) {
+      const guestPeer = new Peer(guestPeerId, { config: RTC_ICE_CONFIG, debug: 1 });
+
+      guestPeer.on('open', (id) => {
+        STATE.peer = guestPeer;
+        STATE.role = 'GUEST';
+        updateRoleBadge('GUEST (Connected)');
+        setupPeerEventHandlers(guestPeer);
+
+        // Open RTCDataChannel directly to the deterministic Host ID
+        const conn = guestPeer.connect(hostPeerId, { reliable: true });
+        bindDataChannel(conn);
+
+        // Also announce via MQTT in case Host is on another Peer ID
+        sendSignalingPacket({ type: 'HELLO_ROOM', username: STATE.username, peerId: id });
+      });
+    }
+
+    function setupPeerEventHandlers(peerInstance) {
+      // Incoming RTCDataChannel
+      peerInstance.on('connection', (conn) => {
+        bindDataChannel(conn);
+      });
+
+      // Incoming Media Call (Either Movie Stage Stream OR Webcam/Voice Call)
+      peerInstance.on('call', (incomingCall) => {
+        const metaType = (incomingCall.metadata && incomingCall.metadata.streamType) || 'STAGE_MOVIE';
+
+        if (metaType === 'WEBCAM_CALL') {
+          // Answer with our local webcam/mic stream if active, or answer empty to receive friend's cam/mic
+          incomingCall.answer(STATE.localCamStream || undefined);
+          bindWebcamCall(incomingCall);
+        } else {
+          // Incoming Movie Stage Stream (Engine A or Engine B from Friend!)
+          incomingCall.answer();
+          incomingCall.on('stream', (remoteMovieStream) => {
+            attachIncomingMovieStream(remoteMovieStream, incomingCall.metadata);
+          });
+          STATE.mediaCallToGuest = incomingCall;
+        }
+      });
+    }
+
+    function bindDataChannel(conn) {
+      STATE.dataConn = conn;
+      conn.on('open', () => {
+        STATE.isConnectedToPeer = true;
+        setConnectionStatus('connected', 'P2P Connected (2/2)');
+        document.getElementById('peerCountBadge').textContent = '2/2';
+        sendSignalingPacket({
+          type: 'PEER_HANDSHAKE',
+          username: STATE.username,
+          peerId: STATE.peer ? STATE.peer.id : null
+        });
+
+        // If we already have a movie loaded or streaming, automatically sync or stream it to our friend!
+        setTimeout(() => {
+          syncExistingMediaToNewPeer();
+        }, 600);
+      });
+
+      conn.on('data', (msg) => {
+        handleSignalingMessage(msg, 'DATACHANNEL');
+      });
+
+      conn.on('close', () => {
+        STATE.isConnectedToPeer = false;
+        setConnectionStatus('ready', 'Friend Disconnected (1/2)');
+        document.getElementById('peerCountBadge').textContent = '1/2';
+      });
+    }
+
+    /*************************************************************************
+     * 3. UNIFIED SIGNALING & BIDIRECTIONAL SYNC PROTOCOL
+     *************************************************************************/
+    function sendSignalingPacket(payload) {
+      const packet = {
+        ...payload,
+        senderId: STATE.clientId,
+        senderName: STATE.username,
+        roomCode: STATE.roomCode,
+        sentAt: Date.now()
+      };
+
+      // 1. Send over ultra-low-latency WebRTC DataChannel if open
+      if (STATE.dataConn && STATE.dataConn.open) {
+        try { STATE.dataConn.send(packet); } catch (e) {}
+      }
+
+      // 2. Also send over WSS MQTT & BroadcastChannel for guaranteed delivery
+      if (STATE.mqttClient && STATE.mqttClient.connected) {
+        const topic = `cinesync_kosmi_v4/${STATE.roomCode}/signal`;
+        try { STATE.mqttClient.publish(topic, JSON.stringify(packet)); } catch (e) {}
+      }
+      if (STATE.bcChannel) {
+        try { STATE.bcChannel.postMessage(packet); } catch (e) {}
+      }
+    }
+
+    // Deduplicate packets arriving simultaneously over DataChannel + MQTT
+    const processedPacketSignatures = new Set();
+
+    function handleSignalingMessage(msg, source) {
+      if (!msg || msg.senderId === STATE.clientId) return;
+
+      const sig = `${msg.senderId}_${msg.type}_${msg.sentAt}`;
+      if (msg.type !== 'RTT_PING' && msg.type !== 'RTT_PONG' && msg.type !== 'HEARTBEAT_SYNC') {
+        if (processedPacketSignatures.has(sig)) return;
+        processedPacketSignatures.add(sig);
+        if (processedPacketSignatures.size > 250) {
+          const first = processedPacketSignatures.values().next().value;
+          processedPacketSignatures.delete(first);
+        }
+      }
+
+      // Mark peer as connected even if signaling over WSS MQTT
+      if (!STATE.isConnectedToPeer) {
+        STATE.isConnectedToPeer = true;
+        setConnectionStatus('connected', `Connected with ${msg.senderName || 'Friend'}`);
+        document.getElementById('peerCountBadge').textContent = '2/2';
+      }
+
+      // If we discovered our friend's PeerJS ID over MQTT and DataChannel isn't open yet, connect!
+      if (msg.peerId && STATE.peer && (!STATE.dataConn || !STATE.dataConn.open)) {
+        if (msg.peerId !== STATE.peer.id) {
+          const conn = STATE.peer.connect(msg.peerId, { reliable: true });
+          bindDataChannel(conn);
+        }
+      }
+
+      switch (msg.type) {
+        case 'HELLO_ROOM':
+          sendSignalingPacket({
+            type: 'PEER_HANDSHAKE',
+            username: STATE.username,
+            peerId: STATE.peer ? STATE.peer.id : null
+          });
+          syncExistingMediaToNewPeer();
+          break;
+
+        case 'PEER_HANDSHAKE':
+          document.getElementById('remoteCamNameTag').textContent = msg.username || 'Friend';
+          appendSystemChat(`⚡ Connected with ${msg.username} via ${source}.`);
+          break;
+
+        case 'CHAT_MESSAGE':
+          appendChatMessage(msg.senderName, msg.text, false);
+          break;
+
+        case 'REACTION_BURST':
+          spawnFloatingEmoji(msg.emoji);
+          break;
+
+        case 'LOAD_SYNC_URL':
+          applyRemoteSyncedUrl(msg.url, msg.title);
+          break;
+
+        case 'SUBTITLE_SYNC_PAYLOAD':
+          receiveSharedSubtitles(msg.trackName, msg.cues);
+          break;
+
+        case 'PLAYER_COMMAND':
+          handleRemotePlayerCommand(msg);
+          break;
+
+        case 'HEARTBEAT_SYNC':
+          handleRemoteHeartbeat(msg);
+          break;
+
+        case 'RTT_PING':
+          sendSignalingPacket({ type: 'RTT_PONG', pingSentAt: msg.pingSentAt });
+          break;
+
+        case 'RTT_PONG':
+          STATE.rttMs = Math.max(1, Date.now() - msg.pingSentAt);
+          break;
+      }
+    }
+
+    /*************************************************************************
+     * 4. THE 4 KOSMI MEDIA ENGINES (LOCAL FILE, VLC WINDOW SHARE, URL SYNC)
+     *************************************************************************/
+
+    // ENGINE A: Local File Streamer (`HTMLMediaElement.captureStream` + MKV EBML Inspector)
+    async function handleLocalVideoFile(event) {
+      const file = event.target.files[0];
+      if (!file) return;
+
+      stopCurrentStageStream();
+      STATE.currentFile = file;
+      STATE.engine = 'LOCAL_FILE';
+
+      const blobUrl = URL.createObjectURL(file);
+      mainVideo.srcObject = null;
+      mainVideo.src = blobUrl;
+      mainVideo.muted = false;
+
+      document.getElementById('emptyStageOverlay').classList.add('hidden');
+      updateEngineBadge(`Engine A: ${file.name.slice(0, 26)}`);
+      appendSystemChat(`📁 Loaded local file "${file.name}". Inspecting audio & subtitle tracks...`);
+
+      // Inspect MKV / MP4 Multi-Audio & Embedded Subtitles
+      await inspectMediaContainerTracks(file);
+
+      mainVideo.onloadedmetadata = () => {
+        mainVideo.play().catch(() => {});
+        // Stream decoded frames + audio directly to Friend via captureStream()
+        setTimeout(() => {
+          broadcastVideoElementCaptureStream(file.name);
+        }, 500);
+      };
+    }
+
+    // Stream local <video> player to Guest using `captureStream()` + High-Bitrate Stereo Opus SDP
+    function broadcastVideoElementCaptureStream(titleLabel) {
+      if (!STATE.peer) return;
+      try {
+        const stream = mainVideo.captureStream ? mainVideo.captureStream(60) :
+                       mainVideo.mozCaptureStream ? mainVideo.mozCaptureStream(60) : null;
+        if (!stream) {
+          appendSystemChat('⚠️ Browser does not support video.captureStream(). Use Engine B (Share VLC/Window).');
+          return;
+        }
+
+        // Apply Kosmi motion hint to video track
+        const vTrack = stream.getVideoTracks()[0];
+        if (vTrack && 'contentHint' in vTrack) {
+          vTrack.contentHint = 'motion';
+        }
+
+        STATE.outgoingStageStream = stream;
+        callPeerWithStageStream(stream, titleLabel, 'LOCAL_FILE');
+      } catch (err) {
+        console.warn('captureStream error:', err);
+      }
+    }
+
+    // ENGINE B: High-Fidelity VLC / Window / Tab Share (`getDisplayMedia` + Stereo Opus 192kbps)
+    async function startVlcWindowShare() {
+      try {
+        stopCurrentStageStream();
+
+        // CRITICAL KOSMI AUDIO CONSTRAINTS: Disable voice DSP so movie music & explosions are never muffled
+        const displayStream = await navigator.mediaDevices.getDisplayMedia({
+          video: {
+            width: { ideal: 1920, max: 3840 },
+            height: { ideal: 1080, max: 2160 },
+            frameRate: { ideal: 60, max: 60 }
+          },
+          audio: {
+            echoCancellation: false,
+            noiseSuppression: false,
+            autoGainControl: false,
+            channelCount: 2,
+            sampleRate: 48000
+          }
+        });
+
+        STATE.engine = 'VLC_CAPTURE';
+        STATE.outgoingStageStream = displayStream;
+
+        const vTrack = displayStream.getVideoTracks()[0];
+        if (vTrack && 'contentHint' in vTrack) {
+          vTrack.contentHint = 'motion';
+        }
+
+        // Preview locally (muted on local video element so the host doesn't hear double audio from VLC + Browser)
+        mainVideo.src = '';
+        mainVideo.srcObject = displayStream;
+        mainVideo.muted = true;
+        await mainVideo.play().catch(() => {});
+
+        document.getElementById('emptyStageOverlay').classList.add('hidden');
+        const hasAudio = displayStream.getAudioTracks().length > 0;
+        updateEngineBadge(`Engine B: VLC/Window Share (${hasAudio ? 'Stereo Audio On' : 'Video Only'})`);
+
+        if (!hasAudio) {
+          appendSystemChat('⚠️ Note: System audio toggle was not checked in the browser share popup. Re-share and enable "Also share system audio" for sound.');
+        } else {
+          appendSystemChat('🖥️ Engine B Active: Streaming VLC / Window with High-Bitrate Stereo Opus (192 kbps, Voice DSP disabled).');
+        }
+
+        callPeerWithStageStream(displayStream, 'VLC / Screen Stream', 'VLC_CAPTURE');
+
+        vTrack.onended = () => {
+          appendSystemChat('Screen share ended.');
+        };
+      } catch (err) {
+        console.warn('getDisplayMedia cancelled:', err);
+      }
+    }
+
+    // ENGINE D: Synchronized Direct URL / Cloud Stream
+    function toggleUrlModal() {
+      const bar = document.getElementById('urlInputBar');
+      bar.classList.toggle('hidden');
+    }
+
+    function loadSyncedUrlMovie() {
+      const url = document.getElementById('directUrlInput').value.trim();
+      if (!url) return;
+      applyRemoteSyncedUrl(url, 'Synced Cloud Stream');
+      sendSignalingPacket({
+        type: 'LOAD_SYNC_URL',
+        url: url,
+        title: 'Synced Cloud Stream'
+      });
+    }
+
+    function loadInstantDemoMovie() {
+      const demoUrl = 'https://commondatastorage.googleapis.com/gtv-videos-bucket/sample/TearsOfSteel.mp4';
+      applyRemoteSyncedUrl(demoUrl, 'Tears of Steel (1080p Sci-Fi Short)');
+      sendSignalingPacket({
+        type: 'LOAD_SYNC_URL',
+        url: demoUrl,
+        title: 'Tears of Steel (1080p Sci-Fi Short)'
+      });
+
+      // Load built-in sample subtitles for immediate testing
+      const demoCues = [
+        { start: 1.0, end: 6.0, text: '🔊 [CineSync Kosmi] Synchronized 1080p Stream + Crisp Subtitle Layer Active!' },
+        { start: 6.5, end: 13.0, text: 'Try pausing, seeking, or sending an emoji reaction — both screens stay locked within 350ms.' },
+        { start: 13.5, end: 22.0, text: 'Subtitles are rendered on a dedicated client DOM layer so they never blur during WebRTC streaming.' }
+      ];
+      STATE.subtitles = [{ name: 'English (Demo Built-in)', cues: demoCues }];
+      STATE.activeSubIndex = 0;
+      renderSubtitleMenu();
+      sendSignalingPacket({
+        type: 'SUBTITLE_SYNC_PAYLOAD',
+        trackName: 'English (Demo Built-in)',
+        cues: demoCues
+      });
+    }
+
+    function applyRemoteSyncedUrl(url, title) {
+      stopCurrentStageStream();
+      STATE.engine = 'SYNC_URL';
+      mainVideo.srcObject = null;
+      mainVideo.src = url;
+      mainVideo.muted = false;
+      document.getElementById('emptyStageOverlay').classList.add('hidden');
+      updateEngineBadge(`Engine D: ${title || 'Direct URL Sync'}`);
+      mainVideo.play().catch(() => {
+        document.getElementById('unmuteRescueBtn').classList.remove('hidden');
+      });
+      appendSystemChat(`🌐 Loaded synchronized stream: ${title}`);
+    }
+
+    /*************************************************************************
+     * 5. WEBRTC STAGE CALLING + SDP OPUS STEREO MUNGING + BITRATE PRESETS
+     *************************************************************************/
+    function callPeerWithStageStream(stream, title, engineType) {
+      const targetPeerId = getRemotePeerId();
+      if (!STATE.peer || !targetPeerId) return;
+
+      try {
+        const call = STATE.peer.call(targetPeerId, stream, {
+          metadata: {
+            streamType: 'STAGE_MOVIE',
+            title: title,
+            engine: engineType
+          },
+          // Kosmi SDP Transform: Force Opus Stereo 192kbps & disable voice comfort noise on movie stream
+          sdpTransform: (sdp) => mungeSdpForHighBitrateStereoOpus(sdp)
+        });
+
+        STATE.mediaCallToGuest = call;
+        setTimeout(() => applyWebRtcQualityPreset(), 1000);
+      } catch (e) {
+        console.warn('Stage call error:', e);
+      }
+    }
+
+    function mungeSdpForHighBitrateStereoOpus(sdp) {
+      if (!sdp) return sdp;
+      // Inject stereo=1; sprop-stereo=1; maxaveragebitrate=192000; cbr=1 into Opus fmtp line
+      return sdp.replace(
+        /a=fmtp:(\d+) minptime=10;useinbandfec=1/g,
+        'a=fmtp:$1 minptime=10;useinbandfec=1;stereo=1;sprop-stereo=1;maxaveragebitrate=192000;cbr=1'
+      );
+    }
+
+    async function applyWebRtcQualityPreset() {
+      const preset = document.getElementById('qualitySelect').value;
+      if (!STATE.mediaCallToGuest || !STATE.mediaCallToGuest.peerConnection) return;
+
+      const pc = STATE.mediaCallToGuest.peerConnection;
+      const senders = pc.getSenders();
+      const videoSender = senders.find(s => s.track && s.track.kind === 'video');
+      if (!videoSender) return;
+
+      try {
+        const params = videoSender.getParameters();
+        if (!params.encodings || params.encodings.length === 0) {
+          params.encodings = [{}];
+        }
+
+        if (preset === '720p30') {
+          params.encodings[0].maxBitrate = 4_000_000; // 4 Mbps
+          params.encodings[0].maxFramerate = 30;
+          params.encodings[0].scaleResolutionDownBy = 1.0;
+        } else if (preset === '1080p60') {
+          params.encodings[0].maxBitrate = 10_000_000; // 10 Mbps
+          params.encodings[0].maxFramerate = 60;
+          params.encodings[0].scaleResolutionDownBy = 1.0;
+        } else if (preset === 'source4k') {
+          params.encodings[0].maxBitrate = 25_000_000; // 25 Mbps
+          params.encodings[0].maxFramerate = 60;
+          params.encodings[0].scaleResolutionDownBy = 1.0;
+        }
+
+        await videoSender.setParameters(params);
+        appendSystemChat(`⚙️ Updated WebRTC encoder target to [${preset.toUpperCase()}].`);
+      } catch (e) {
+        console.warn('setParameters warning:', e);
+      }
+    }
+
+    function attachIncomingMovieStream(remoteStream, metadata) {
+      STATE.engine = 'RECEIVING_STREAM';
+      mainVideo.src = '';
+      mainVideo.srcObject = remoteStream;
+      mainVideo.muted = false;
+
+      document.getElementById('emptyStageOverlay').classList.add('hidden');
+      const title = (metadata && metadata.title) || "Friend's Live Stream";
+      updateEngineBadge(`📡 Watching: ${title}`);
+      appendSystemChat(`🎬 Receiving live WebRTC movie stream from friend (${title}). You have full remote Play/Pause/Seek control!`);
+
+      mainVideo.play().then(() => {
+        document.getElementById('unmuteRescueBtn').classList.add('hidden');
+      }).catch(() => {
+        // Browser blocked unmuted autoplay; show one-click rescue button
+        document.getElementById('unmuteRescueBtn').classList.remove('hidden');
+      });
+    }
+
+    function forceUnmuteAndPlayGuestStream() {
+      mainVideo.muted = false;
+      mainVideo.play().catch(() => {});
+      document.getElementById('unmuteRescueBtn').classList.add('hidden');
+    }
+
+    /*************************************************************************
+     * 6. BIDIRECTIONAL PLAYBACK CONTROLS & RTT-COMPENSATED DRIFT LOCK
+     *************************************************************************/
+    function setupVideoPlayerListeners() {
+      mainVideo.addEventListener('timeupdate', () => {
+        const cur = STATE.engine === 'RECEIVING_STREAM' ? STATE.remoteCurrentTime : mainVideo.currentTime;
+        const dur = STATE.engine === 'RECEIVING_STREAM' ? STATE.remoteDuration : (mainVideo.duration || 0);
+
+        if (!STATE.isSeeking && dur > 0 && isFinite(dur)) {
+          seekSlider.value = ((cur / dur) * 100).toFixed(2);
+        }
+        document.getElementById('currentTimeLabel').textContent = formatTime(cur);
+        document.getElementById('durationLabel').textContent = formatTime(dur);
+
+        // Render Crisp Client-Side Subtitles at current timestamp
+        renderActiveSubtitleCue(cur);
+      });
+
+      mainVideo.addEventListener('play', () => updatePlayPauseUi(false));
+      mainVideo.addEventListener('pause', () => updatePlayPauseUi(true));
+    }
+
+    function userTogglePlayPause() {
+      if (STATE.engine === 'RECEIVING_STREAM') {
+        // Guest forwards command to Host's player!
+        sendSignalingPacket({
+          type: 'PLAYER_COMMAND',
+          action: 'TOGGLE_PLAY_FOR_HOST'
+        });
+        return;
+      }
+
+      if (mainVideo.paused) {
+        mainVideo.play().catch(() => {});
+        sendSignalingPacket({
+          type: 'PLAYER_COMMAND',
+          action: 'PLAY',
+          currentTime: mainVideo.currentTime
+        });
+      } else {
+        mainVideo.pause();
+        sendSignalingPacket({
+          type: 'PLAYER_COMMAND',
+          action: 'PAUSE',
+          currentTime: mainVideo.currentTime
+        });
+      }
+    }
+
+    function userSkipSeconds(deltaSec) {
+      if (STATE.engine === 'RECEIVING_STREAM') {
+        const target = Math.max(0, STATE.remoteCurrentTime + deltaSec);
+        sendSignalingPacket({
+          type: 'PLAYER_COMMAND',
+          action: 'SEEK',
+          currentTime: target
+        });
+        return;
+      }
+      const nextTime = Math.max(0, Math.min(mainVideo.duration || 99999, mainVideo.currentTime + deltaSec));
+      mainVideo.currentTime = nextTime;
+      sendSignalingPacket({
+        type: 'PLAYER_COMMAND',
+        action: 'SEEK',
+        currentTime: nextTime
+      });
+    }
+
+    function handleSeekInput(percentVal) {
+      STATE.isSeeking = true;
+      const dur = STATE.engine === 'RECEIVING_STREAM' ? STATE.remoteDuration : (mainVideo.duration || 0);
+      if (dur > 0) {
+        const previewTime = (parseFloat(percentVal) / 100) * dur;
+        document.getElementById('currentTimeLabel').textContent = formatTime(previewTime);
+      }
+    }
+
+    function handleSeekCommit(percentVal) {
+      STATE.isSeeking = false;
+      const dur = STATE.engine === 'RECEIVING_STREAM' ? STATE.remoteDuration : (mainVideo.duration || 0);
+      if (dur <= 0) return;
+
+      const targetTime = (parseFloat(percentVal) / 100) * dur;
+      if (STATE.engine === 'RECEIVING_STREAM') {
+        STATE.remoteCurrentTime = targetTime;
+        sendSignalingPacket({
+          type: 'PLAYER_COMMAND',
+          action: 'SEEK',
+          currentTime: targetTime
+        });
+      } else {
+        mainVideo.currentTime = targetTime;
+        sendSignalingPacket({
+          type: 'PLAYER_COMMAND',
+          action: 'SEEK',
+          currentTime: targetTime
+        });
+      }
+    }
+
+    function handleRemotePlayerCommand(msg) {
+      if (msg.action === 'TOGGLE_PLAY_FOR_HOST') {
+        userTogglePlayPause();
+        return;
+      }
+
+      if (STATE.engine === 'RECEIVING_STREAM') return; // Host controls physical timeline of stream
+
+      STATE.suppressSyncEcho = true;
+      if (typeof msg.currentTime === 'number' && Math.abs(mainVideo.currentTime - msg.currentTime) > 0.4) {
+        mainVideo.currentTime = msg.currentTime;
+      }
+      if (msg.action === 'PLAY') {
+        mainVideo.play().catch(() => {});
+      } else if (msg.action === 'PAUSE') {
+        mainVideo.pause();
+      } else if (msg.action === 'SEEK' && typeof msg.currentTime === 'number') {
+        mainVideo.currentTime = msg.currentTime;
+      }
+      setTimeout(() => { STATE.suppressSyncEcho = false; }, 250);
+    }
+
+    // RTT-Compensated Drift Correction Loop (Every 2000ms)
+    function runHeartbeatAndDriftLoop() {
+      if (!STATE.isConnectedToPeer) return;
+
+      // Measure RTT
+      STATE.lastPingSentAt = Date.now();
+      sendSignalingPacket({ type: 'RTT_PING', pingSentAt: STATE.lastPingSentAt });
+
+      // If we are playing a local file or synced URL, broadcast master clock state
+      if (STATE.engine === 'LOCAL_FILE' || STATE.engine === 'SYNC_URL') {
+        if (mainVideo.duration > 0) {
+          sendSignalingPacket({
+            type: 'HEARTBEAT_SYNC',
+            currentTime: mainVideo.currentTime,
+            duration: mainVideo.duration,
+            paused: mainVideo.paused
+          });
+        }
+      }
+    }
+
+    function handleRemoteHeartbeat(msg) {
+      const oneWayLatencySec = (STATE.rttMs / 2) / 1000;
+      const compensatedRemoteTime = msg.paused ? msg.currentTime : (msg.currentTime + oneWayLatencySec);
+
+      // Update Guest's timeline & subtitle clock when watching Host's WebRTC stream
+      if (STATE.engine === 'RECEIVING_STREAM') {
+        STATE.remoteCurrentTime = compensatedRemoteTime;
+        STATE.remoteDuration = msg.duration || 0;
+        updatePlayPauseUi(msg.paused);
+        renderActiveSubtitleCue(compensatedRemoteTime);
+        return;
+      }
+
+      // If both peers have the movie open locally or via Sync URL, apply Kosmi RTT Drift Correction
+      if (STATE.engine === 'LOCAL_FILE' || STATE.engine === 'SYNC_URL') {
+        const driftSec = mainVideo.currentTime - compensatedRemoteTime;
+        STATE.clockDriftMs = Math.round(driftSec * 1000);
+
+        const pill = document.getElementById('driftLockPill');
+        pill.classList.remove('hidden');
+
+        if (Math.abs(driftSec) > 1.2) {
+          // Hard micro-seek if drift exceeds 1.2 seconds
+          mainVideo.currentTime = compensatedRemoteTime;
+          mainVideo.playbackRate = 1.0;
+          pill.textContent = `⚡ Re-locked (${STATE.clockDriftMs}ms)`;
+        } else if (Math.abs(driftSec) > 0.35 && !msg.paused) {
+          // Smooth Kosmi playbackRate nudge (0.96x or 1.04x) for jitterless frame lock
+          mainVideo.playbackRate = driftSec > 0 ? 0.96 : 1.04;
+          pill.textContent = `⚡ Nudging (${STATE.clockDriftMs}ms)`;
+        } else {
+          mainVideo.playbackRate = 1.0;
+          pill.textContent = `⚡ Locked (${Math.abs(STATE.clockDriftMs)}ms)`;
+        }
+      }
+    }
+
+    function requestManualForceSync() {
+      if (STATE.engine === 'RECEIVING_STREAM') {
+        appendSystemChat('🔄 Synced timeline with Host stream.');
+        return;
+      }
+      sendSignalingPacket({
+        type: 'PLAYER_COMMAND',
+        action: mainVideo.paused ? 'PAUSE' : 'PLAY',
+        currentTime: mainVideo.currentTime
+      });
+      appendSystemChat(`🔄 Broadcasted timestamp (${formatTime(mainVideo.currentTime)}) to room.`);
+    }
+
+    function syncExistingMediaToNewPeer() {
+      if (STATE.engine === 'SYNC_URL' && mainVideo.src) {
+        sendSignalingPacket({
+          type: 'LOAD_SYNC_URL',
+          url: mainVideo.src,
+          title: 'Synced Cloud Stream'
+        });
+      } else if ((STATE.engine === 'LOCAL_FILE' || STATE.engine === 'VLC_CAPTURE') && STATE.outgoingStageStream) {
+        callPeerWithStageStream(STATE.outgoingStageStream, STATE.currentFile ? STATE.currentFile.name : 'Live Stream', STATE.engine);
+      }
+
+      if (STATE.activeSubIndex >= 0 && STATE.subtitles[STATE.activeSubIndex]) {
+        broadcastActiveSubtitlesToPeer();
+      }
+    }
+
+    /*************************************************************************
+     * 7. MKV / MP4 MULTI-AUDIO INSPECTOR & SUBTITLE OVERLAY ENGINE
+     *************************************************************************/
+    async function inspectMediaContainerTracks(file) {
+      STATE.detectedAudioTracks = [];
+      const trackListEl = document.getElementById('audioTrackList');
+      trackListEl.innerHTML = '<div class="text-slate-400">Scanning container header...</div>';
+
+      // 1. Check standard browser `video.audioTracks` API first
+      setTimeout(() => {
+        if (mainVideo.audioTracks && mainVideo.audioTracks.length > 0) {
+          STATE.detectedAudioTracks = Array.from(mainVideo.audioTracks).map((t, idx) => ({
+            index: idx,
+            label: t.label || `Audio Track ${idx + 1}`,
+            lang: t.language || 'und',
+            codec: 'Native',
+            nativeTrack: t
+          }));
+          renderAudioTrackMenu();
+        }
+      }, 600);
+
+      // 2. Binary Matroska (.MKV) Header Slice Scanner for Dual-Audio & Embedded Subtitles
+      if (file.name.toLowerCase().endsWith('.mkv') || file.name.toLowerCase().endsWith('.webm')) {
+        try {
+          const headerSlice = await file.slice(0, 2 * 1024 * 1024).arrayBuffer();
+          STATE.ebmlHeaderBuffer = headerSlice;
+          const bytes = new Uint8Array(headerSlice);
+          const ascii = new TextDecoder('utf-8', { fatal: false }).decode(bytes);
+
+          // Detect embedded audio codecs & languages in MKV TrackEntries
+          const foundCodecs = [];
+          if (ascii.includes('A_AAC')) foundCodecs.push('AAC');
+          if (ascii.includes('A_OPUS')) foundCodecs.push('Opus');
+          if (ascii.includes('A_VORBIS')) foundCodecs.push('Vorbis');
+          if (ascii.includes('A_EAC3')) foundCodecs.push('Dolby EAC3');
+          if (ascii.includes('A_AC3')) foundCodecs.push('Dolby AC3');
+          if (ascii.includes('A_DTS')) foundCodecs.push('DTS');
+
+          const langs = [];
+          if (ascii.includes('hin')) langs.push('🇮🇳 Hindi');
+          if (ascii.includes('eng')) langs.push('🇺🇸 English');
+          if (ascii.includes('jpn')) langs.push('🇯🇵 Japanese');
+          if (ascii.includes('tam')) langs.push('🇮🇳 Tamil');
+          if (ascii.includes('tel')) langs.push('🇮🇳 Telugu');
+
+          if (langs.length === 0) langs.push('Track 1 (Default)', 'Track 2 (Secondary)');
+
+          STATE.detectedAudioTracks = langs.map((langName, idx) => ({
+            index: idx,
+            label: `${langName}`,
+            codec: foundCodecs[idx] || foundCodecs[0] || 'MKV Audio',
+            isProprietaryDolby: (foundCodecs[idx] || '').includes('Dolby') || (foundCodecs[idx] || '').includes('DTS')
+          }));
+
+          renderAudioTrackMenu();
+          document.getElementById('audioBtnLabel').textContent = `Audio (${STATE.detectedAudioTracks.length})`;
+        } catch (e) {
+          console.warn('MKV header inspect error:', e);
+        }
+      }
+    }
+
+    function renderAudioTrackMenu() {
+      const container = document.getElementById('audioTrackList');
+      if (!STATE.detectedAudioTracks.length) {
+        container.innerHTML = `<div class="text-slate-300 py-1">Default Stereo Audio Track Active</div>`;
+        return;
+      }
+
+      container.innerHTML = STATE.detectedAudioTracks.map((t, i) => `
+        <button onclick="switchAudioTrack(${i})"
+          class="w-full text-left px-2.5 py-1.5 rounded-lg bg-slate-800/90 hover:bg-indigo-600/30 border border-slate-700 flex items-center justify-between transition">
+          <span class="font-medium text-white">${t.label}</span>
+          <span class="text-[10px] font-mono px-1.5 py-0.5 rounded bg-slate-900 text-indigo-300">${t.codec}</span>
+        </button>
+      `).join('');
+    }
+
+    function switchAudioTrack(idx) {
+      const trackInfo = STATE.detectedAudioTracks[idx];
+      if (!trackInfo) return;
+
+      // 1. If native browser audioTracks API is available
+      if (mainVideo.audioTracks && mainVideo.audioTracks.length > idx) {
+        for (let i = 0; i < mainVideo.audioTracks.length; i++) {
+          mainVideo.audioTracks[i].enabled = (i === idx);
+        }
+        appendSystemChat(`🎧 Switched to audio track: ${trackInfo.label}`);
+        return;
+      }
+
+      // 2. Warn if MKV uses Dolby AC3/DTS and offer instant VLC Window Share
+      if (trackInfo.isProprietaryDolby) {
+        appendSystemChat(`⚠️ Track "${trackInfo.label}" uses ${trackInfo.codec}. If your browser plays no sound, click [Engine B: Share VLC Window] to stream VLC's native audio decoder!`);
+      } else {
+        appendSystemChat(`🎧 Selected ${trackInfo.label} (${trackInfo.codec}).`);
+      }
+    }
+
+    // External .SRT / .VTT / .ASS Subtitle Parser & Synchronizer
+    async function handleExternalSubtitleFile(event) {
+      const file = event.target.files[0];
+      if (!file) return;
+
+      const rawText = await file.text();
+      const cues = parseSubtitleTextToCues(rawText);
+
+      const newTrack = {
+        name: file.name.replace(/\.(srt|vtt|ass)$/i, ''),
+        cues: cues
+      };
+
+      STATE.subtitles.push(newTrack);
+      STATE.activeSubIndex = STATE.subtitles.length - 1;
+      renderSubtitleMenu();
+      appendSystemChat(`💬 Loaded subtitle track "${newTrack.name}" (${cues.length} cues) & synced to friend!`);
+
+      // Automatically push subtitle cues over DataChannel/WSS so friend sees crisp subtitles too
+      broadcastActiveSubtitlesToPeer();
+    }
+
+    function parseSubtitleTextToCues(raw) {
+      const cues = [];
+      const normalized = raw.replace(/\r\n/g, '\n').replace(/\r/g, '\n');
+
+      // Handle SRT & WebVTT timestamps: 00:01:23,450 --> 00:01:26,200
+      const blocks = normalized.split(/\n\s*\n/);
+      const timeRegex = /(\d{1,2}:)?(\d{2}):(\d{2})[.,](\d{3})\s*-->\s*(\d{1,2}:)?(\d{2}):(\d{2})[.,](\d{3})/;
+
+      for (const block of blocks) {
+        const lines = block.trim().split('\n');
+        let matchLineIdx = -1;
+        let match = null;
+
+        for (let i = 0; i < lines.length; i++) {
+          const m = lines[i].match(timeRegex);
+          if (m) {
+            matchLineIdx = i;
+            match = m;
+            break;
+          }
+        }
+
+        if (match && matchLineIdx !== -1) {
+          const startSec = parseTimeMatch(match[1], match[2], match[3], match[4]);
+          const endSec = parseTimeMatch(match[5], match[6], match[7], match[8]);
+          const textLines = lines.slice(matchLineIdx + 1)
+            .join('<br/>')
+            .replace(/\{[^}]*\}/g, ''); // Strip ASS style override tags
+          if (textLines) {
+            cues.push({ start: startSec, end: endSec, text: textLines });
+          }
+        }
+      }
+      return cues;
+    }
+
+    function parseTimeMatch(hStr, mStr, sStr, msStr) {
+      const h = hStr ? parseInt(hStr.replace(':', ''), 10) : 0;
+      const m = parseInt(mStr, 10);
+      const s = parseInt(sStr, 10);
+      const ms = parseInt(msStr, 10);
+      return h * 3600 + m * 60 + s + ms / 1000;
+    }
+
+    function renderActiveSubtitleCue(currentTimeSec) {
+      const overlay = document.getElementById('subtitleOverlay');
+      if (STATE.activeSubIndex < 0 || !STATE.subtitles[STATE.activeSubIndex]) {
+        overlay.innerHTML = '';
+        return;
+      }
+
+      const cues = STATE.subtitles[STATE.activeSubIndex].cues;
+      const adjustedTime = currentTimeSec - STATE.subOffsetSec;
+
+      const activeCue = cues.find(c => adjustedTime >= c.start && adjustedTime <= c.end);
+      overlay.innerHTML = activeCue ? activeCue.text : '';
+    }
+
+    function renderSubtitleMenu() {
+      const list = document.getElementById('subtitleTrackList');
+      let html = `
+        <button onclick="selectSubtitleTrack(-1)"
+          class="w-full text-left px-2 py-1 rounded ${STATE.activeSubIndex === -1 ? 'bg-indigo-600 text-white' : 'bg-slate-800 text-slate-300'}">
+          Off (No Subtitles)
+        </button>
+      `;
+
+      STATE.subtitles.forEach((t, idx) => {
+        const active = STATE.activeSubIndex === idx;
+        html += `
+          <button onclick="selectSubtitleTrack(${idx})"
+            class="w-full text-left px-2 py-1 rounded ${active ? 'bg-indigo-600 text-white font-semibold' : 'bg-slate-800 text-slate-200'}">
+            💬 ${t.name} (${t.cues.length} lines)
+          </button>
+        `;
+      });
+
+      list.innerHTML = html;
+      document.getElementById('subBtnLabel').textContent = STATE.activeSubIndex >= 0 ? 'CC On' : 'Subtitles';
+    }
+
+    function selectSubtitleTrack(idx) {
+      STATE.activeSubIndex = idx;
+      renderSubtitleMenu();
+    }
+
+    function adjustSubOffset(delta) {
+      STATE.subOffsetSec = Math.round((STATE.subOffsetSec + delta) * 10) / 10;
+      document.getElementById('subOffsetLabel').textContent = (STATE.subOffsetSec >= 0 ? '+' : '') + STATE.subOffsetSec.toFixed(1) + 's';
+    }
+
+    function broadcastActiveSubtitlesToPeer() {
+      if (STATE.activeSubIndex < 0 || !STATE.subtitles[STATE.activeSubIndex]) return;
+      const track = STATE.subtitles[STATE.activeSubIndex];
+      sendSignalingPacket({
+        type: 'SUBTITLE_SYNC_PAYLOAD',
+        trackName: track.name,
+        cues: track.cues
+      });
+    }
+
+    function receiveSharedSubtitles(trackName, cues) {
+      if (!Array.isArray(cues)) return;
+      STATE.subtitles.push({ name: `${trackName} (Synced)`, cues });
+      STATE.activeSubIndex = STATE.subtitles.length - 1;
+      renderSubtitleMenu();
+      appendSystemChat(`💬 Received synchronized subtitle track "${trackName}" (${cues.length} cues) from friend.`);
+    }
+
+    /*************************************************************************
+     * 8. AEC3 VOICE & VIDEO CALL SUBSYSTEM + INDEPENDENT WEB AUDIO MIXER
+     *************************************************************************/
+    async function toggleMediaCall() {
+      const btn = document.getElementById('callToggleBtn');
+
+      if (STATE.localCamStream) {
+        // Leave Call
+        STATE.localCamStream.getTracks().forEach(t => t.stop());
+        STATE.localCamStream = null;
+        document.getElementById('localCamVideo').classList.add('hidden');
+        document.getElementById('localCamPlaceholder').classList.remove('hidden');
+        btn.textContent = 'Join Call';
+        btn.className = 'bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-semibold px-3 py-1.5 rounded-lg shadow transition';
+        return;
+      }
+
+      try {
+        // Kosmi Voice DSP Pipeline: Enable AEC3, Noise Suppression, and AGC strictly on Microphone
+        let stream = null;
+        try {
+          stream = await navigator.mediaDevices.getUserMedia({
+            video: { width: { ideal: 480 }, height: { ideal: 270 }, frameRate: { ideal: 20 } },
+            audio: {
+              echoCancellation: true,
+              noiseSuppression: true,
+              autoGainControl: true
+            }
+          });
+        } catch (camErr) {
+          // Fallback to Voice-Only if webcam is busy (e.g. used by OBS)
+          stream = await navigator.mediaDevices.getUserMedia({
+            video: false,
+            audio: {
+              echoCancellation: true,
+              noiseSuppression: true,
+              autoGainControl: true
+            }
+          });
+          appendSystemChat('🎤 Camera busy or unavailable — joined in Voice-Only AEC3 mode.');
+        }
+
+        STATE.localCamStream = stream;
+        const localCamEl = document.getElementById('localCamVideo');
+        if (stream.getVideoTracks().length > 0) {
+          localCamEl.srcObject = stream;
+          localCamEl.classList.remove('hidden');
+          document.getElementById('localCamPlaceholder').classList.add('hidden');
+        }
+
+        btn.textContent = 'Leave Call';
+        btn.className = 'bg-rose-600 hover:bg-rose-500 text-white text-xs font-semibold px-3 py-1.5 rounded-lg shadow transition';
+
+        const targetPeerId = getRemotePeerId();
+        if (STATE.peer && targetPeerId) {
+          const call = STATE.peer.call(targetPeerId, stream, {
+            metadata: { streamType: 'WEBCAM_CALL' }
+          });
+          bindWebcamCall(call);
+        }
+      } catch (err) {
+        appendSystemChat('⚠️ Microphone/Camera permission denied.');
+      }
+    }
+
+    function bindWebcamCall(call) {
+      STATE.webcamCall = call;
+      call.on('stream', (remoteStream) => {
+        const remoteCamEl = document.getElementById('remoteCamVideo');
+        remoteCamEl.srcObject = remoteStream;
+        remoteCamEl.classList.remove('hidden');
+        document.getElementById('remoteCamPlaceholder').classList.add('hidden');
+
+        // Route Friend's Voice through Web Audio API GainNode so it can be boosted up to 150% independently of Movie Volume
+        try {
+          if (!STATE.audioCtx) {
+            STATE.audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+          }
+          const source = STATE.audioCtx.createMediaStreamSource(remoteStream);
+          STATE.friendGainNode = STATE.audioCtx.createGain();
+          STATE.friendGainNode.gain.value = parseFloat(document.getElementById('friendVoiceSlider').value || '1');
+          source.connect(STATE.friendGainNode);
+          STATE.friendGainNode.connect(STATE.audioCtx.destination);
+          // Mute raw video element audio since Web Audio API is outputting the amplified audio
+          remoteCamEl.muted = true;
+        } catch (e) {
+          remoteCamEl.muted = false;
+        }
+      });
+    }
+
+    function setMovieVolume(val) {
+      mainVideo.volume = parseFloat(val);
+    }
+
+    function setFriendVoiceGain(val) {
+      const num = parseFloat(val);
+      if (STATE.friendGainNode) {
+        STATE.friendGainNode.gain.value = num;
+      } else {
+        const remoteCamEl = document.getElementById('remoteCamVideo');
+        remoteCamEl.volume = Math.min(1, num);
+      }
+    }
+
+    function toggleMicMute() {
+      if (!STATE.localCamStream) return;
+      STATE.micMuted = !STATE.micMuted;
+      STATE.localCamStream.getAudioTracks().forEach(t => t.enabled = !STATE.micMuted);
+      document.getElementById('micMuteBtn').textContent = STATE.micMuted ? '🔇 Mic Muted' : '🎤 Mic On';
+    }
+
+    function toggleCamMute() {
+      if (!STATE.localCamStream) return;
+      STATE.camMuted = !STATE.camMuted;
+      STATE.localCamStream.getVideoTracks().forEach(t => t.enabled = !STATE.camMuted);
+      document.getElementById('camMuteBtn').textContent = STATE.camMuted ? '🚫 Cam Off' : '📷 Cam On';
+    }
+
+    /*************************************************************************
+     * 9. REAL-TIME TELEMETRY (`RTCPeerConnection.getStats()`)
+     *************************************************************************/
+    function toggleTelemetryOverlay() {
+      document.getElementById('telemetryHud').classList.toggle('hidden');
+    }
+
+    async function pollWebRtcStats() {
+      document.getElementById('statEngine').textContent = STATE.engine;
+      document.getElementById('statRtt').textContent = `${STATE.rttMs} ms`;
+      document.getElementById('statDrift').textContent = `${STATE.clockDriftMs} ms`;
+
+      if (!STATE.mediaCallToGuest || !STATE.mediaCallToGuest.peerConnection) return;
+
+      try {
+        const stats = await STATE.mediaCallToGuest.peerConnection.getStats();
+        stats.forEach(report => {
+          if (report.type === 'outbound-rtp' && report.kind === 'video') {
+            const now = report.timestamp;
+            const bytes = report.bytesSent || 0;
+            if (STATE.lastStatsTimestamp > 0 && now > STATE.lastStatsTimestamp) {
+              const kbps = Math.round(((bytes - STATE.lastBytesTransferred) * 8) / (now - STATE.lastStatsTimestamp));
+              document.getElementById('statBitrate').textContent = `${kbps} kbps`;
+            }
+            STATE.lastBytesTransferred = bytes;
+            STATE.lastStatsTimestamp = now;
+
+            const w = report.frameWidth || mainVideo.videoWidth || '—';
+            const h = report.frameHeight || mainVideo.videoHeight || '—';
+            const fps = report.framesPerSecond || 30;
+            document.getElementById('statResFps').textContent = `${w}×${h} @ ${fps}fps`;
+            document.getElementById('statQualityLimit').textContent = report.qualityLimitationReason || 'none';
+          }
+          if (report.type === 'inbound-rtp' && report.kind === 'video') {
+            const now = report.timestamp;
+            const bytes = report.bytesReceived || 0;
+            if (STATE.lastStatsTimestamp > 0 && now > STATE.lastStatsTimestamp) {
+              const kbps = Math.round(((bytes - STATE.lastBytesTransferred) * 8) / (now - STATE.lastStatsTimestamp));
+              document.getElementById('statBitrate').textContent = `${kbps} kbps (In)`;
+            }
+            STATE.lastBytesTransferred = bytes;
+            STATE.lastStatsTimestamp = now;
+            const w = report.frameWidth || mainVideo.videoWidth || '—';
+            const h = report.frameHeight || mainVideo.videoHeight || '—';
+            const fps = report.framesPerSecond || 30;
+            document.getElementById('statResFps').textContent = `${w}×${h} @ ${fps}fps`;
+          }
+        });
+      } catch (e) {}
+    }
+
+    /*************************************************************************
+     * 10. CHAT, FLOATING REACTIONS & UI HELPERS
+     *************************************************************************/
+    function handleChatSubmit(e) {
+      e.preventDefault();
+      const input = document.getElementById('chatInput');
+      const text = input.value.trim();
+      if (!text) return;
+      input.value = '';
+
+      appendChatMessage(STATE.username, text, true);
+      sendSignalingPacket({
+        type: 'CHAT_MESSAGE',
+        text: text
+      });
+    }
+
+    function appendChatMessage(sender, text, isSelf) {
+      const box = document.getElementById('chatMessagesBox');
+      const div = document.createElement('div');
+      div.className = `rounded-xl p-2.5 text-xs ${isSelf ? 'bg-indigo-600/20 border border-indigo-500/30 text-indigo-100 ml-4' : 'bg-slate-900/90 border border-slate-800 text-slate-200 mr-4'}`;
+      div.innerHTML = `<span class="font-bold ${isSelf ? 'text-indigo-400' : 'text-emerald-400'}">${escapeHtml(sender)}:</span> ${escapeHtml(text)}`;
+      box.appendChild(div);
+      box.scrollTop = box.scrollHeight;
+    }
+
+    function appendSystemChat(text) {
+      const box = document.getElementById('chatMessagesBox');
+      const div = document.createElement('div');
+      div.className = 'bg-slate-900/70 border border-slate-800/80 rounded-xl p-2 text-[11px] text-slate-400';
+      div.textContent = text;
+      box.appendChild(div);
+      box.scrollTop = box.scrollHeight;
+    }
+
+    function sendReaction(emoji) {
+      spawnFloatingEmoji(emoji);
+      sendSignalingPacket({
+        type: 'REACTION_BURST',
+        emoji: emoji
+      });
+    }
+
+    function spawnFloatingEmoji(emoji) {
+      const stage = document.getElementById('reactionStage');
+      const el = document.createElement('div');
+      el.className = 'floating-emoji';
+      el.textContent = emoji;
+      el.style.left = `${15 + Math.random() * 70}%`;
+      stage.appendChild(el);
+      setTimeout(() => el.remove(), 2500);
+    }
+
+    function copyInviteLink() {
+      const url = `${window.location.origin}${window.location.pathname}?room=${STATE.roomCode}`;
+      navigator.clipboard.writeText(url).then(() => {
+        const btnText = document.getElementById('inviteBtnText');
+        btnText.textContent = 'Copied!';
+        setTimeout(() => { btnText.textContent = 'Invite Link'; }, 2000);
+      });
+    }
+
+    function getRemotePeerId() {
+      if (STATE.dataConn && STATE.dataConn.peer) return STATE.dataConn.peer;
+      const roomLower = STATE.roomCode.toLowerCase();
+      if (STATE.role === 'GUEST') return `kosmi-v4-${roomLower}-host`;
+      return null;
+    }
+
+    function stopCurrentStageStream() {
+      if (STATE.outgoingStageStream) {
+        STATE.outgoingStageStream.getTracks().forEach(t => t.stop());
+        STATE.outgoingStageStream = null;
+      }
+    }
+
+    function togglePopover(id) {
+      const target = document.getElementById(id);
+      const others = ['audioPopover', 'subtitlePopover'].filter(x => x !== id);
+      others.forEach(o => document.getElementById(o).classList.add('hidden'));
+      target.classList.toggle('hidden');
+    }
+
+    function toggleStageFullscreen() {
+      const stage = document.getElementById('stageContainer');
+      if (!document.fullscreenElement) {
+        stage.requestFullscreen().catch(() => {});
+      } else {
+        document.exitFullscreen().catch(() => {});
+      }
+    }
+
+    function setConnectionStatus(state, text) {
+      const dot = document.getElementById('connDot');
+      const label = document.getElementById('connStatusText');
+      label.textContent = text;
+      if (state === 'connected') {
+        dot.className = 'w-2.5 h-2.5 rounded-full bg-emerald-400 shadow-sm shadow-emerald-400';
+      } else if (state === 'ready') {
+        dot.className = 'w-2.5 h-2.5 rounded-full bg-cyan-400';
+      } else {
+        dot.className = 'w-2.5 h-2.5 rounded-full bg-amber-400 animate-pulse';
+      }
+    }
+
+    function updateRoleBadge(text) {
+      document.getElementById('roleBadge').textContent = text;
+    }
+
+    function updateEngineBadge(text) {
+      document.getElementById('activeEnginePill').textContent = text;
+    }
+
+    function updatePlayPauseUi(paused) {
+      document.getElementById('playPauseIcon').textContent = paused ? '▶️' : '⏸️';
+      document.getElementById('playPauseText').textContent = paused ? 'Play' : 'Pause';
+    }
+
+    function formatTime(sec) {
+      if (!sec || !isFinite(sec) || sec < 0) return '00:00';
+      const total = Math.floor(sec);
+      const h = Math.floor(total / 3600);
+      const m = Math.floor((total % 3600) / 60);
+      const s = total % 60;
+      if (h > 0) {
+        return `${h}:${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}`;
+      }
+      return `${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}`;
+    }
+
+    function escapeHtml(str) {
+      return String(str).replace(/[&<>"']/g, s => ({
+        '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'
+      }[s]));
+    }
+  </script>
+</body>
+</html>
